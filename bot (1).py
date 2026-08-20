@@ -29,8 +29,8 @@ from telegram.error import TelegramError
 # ─────────────────────────────────────────
 #  CONFIGURATION  (edit these)
 # ─────────────────────────────────────────
-BOT_TOKEN  = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-ADMIN_IDS  = [int(x) for x in os.getenv("ADMIN_IDS", "123456789").split(",")]
+BOT_TOKEN  = os.getenv("BOT_TOKEN", "8999281826:AAEdyj5rcIsuQkN5ktQOhLb0PYqEL3C8XKQ")
+ADMIN_IDS  = [int(x) for x in os.getenv("ADMIN_IDS", "7407431042").split(",")]
 
 # ─────────────────────────────────────────
 #  LOGGING
