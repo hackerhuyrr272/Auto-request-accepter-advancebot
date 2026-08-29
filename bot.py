@@ -313,7 +313,17 @@ async def process_redemption(call: CallbackQuery):
          InlineKeyboardButton(text="❌ Reject", callback_data=f"adm_reject_{tx_id}")]
     ])
     await bot.send_message(ADMIN_ID, admin_text, reply_markup=admin_kb)
-    await call.message.edit_text(f"✅ <b>Request Submitted!</b>\n\nYour request for ₹{rupees} has been sent to the admins. It is currently pending.", reply_markup=main_menu_kb())
+    
+    # NEW BEAUTIFUL SUCCESS MESSAGE FOR THE USER
+    user_success_text = (
+        f"✅ <b>Redemption Request Submitted!</b>\n\n"
+        f"💳 <b>Amount:</b> ₹{rupees} Gift Card\n"
+        f"💰 <b>Points Deducted:</b> {cost}\n"
+        f"⏳ <b>Status:</b> Pending\n\n"
+        "🔔 <i>Note: Once the admin verifies your invites and approves your request, you will receive your Google Play redeem code directly in this chat!</i>"
+    )
+    await call.message.delete()
+    await call.message.answer(user_success_text, reply_markup=main_menu_kb())
 
 # --- ADVANCED ADMIN PANEL ---
 async def show_admin_panel(message: Message | CallbackQuery):
