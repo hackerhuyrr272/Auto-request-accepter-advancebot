@@ -483,4 +483,30 @@ async def adm_reject(call: CallbackQuery, state: FSMContext):
 async def adm_broadcast_start(call: CallbackQuery, state: FSMContext):
     if call.from_user.id != ADMIN_ID: return
     await state.set_state(AdminStates.waiting_for_broadcast)
-    await call.message.answer("📢 Send
+    await call.message.answer("📢 Send the message you want to broadcast (Text, Photo, or Video):")
+    await call.answer()
+
+@router.message(AdminStates.waiting_for_broadcast)
+async def process_broadcast(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    
+    await message.answer("📢 Broadcasting message... This might take a while.")
+    cursor = users_col.find({})
+    success = 0
+    async for user in cursor:
+        try:
+            await message.send_copy(chat_id=user['_id'])
+            success += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            pass
+            
+    await message.answer(f"✅ Broadcast complete! Sent to {success} users.")
+    await state.clear()
+
+async def main():
+    print("Bot is starting...")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
