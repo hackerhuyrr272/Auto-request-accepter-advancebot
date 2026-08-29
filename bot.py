@@ -474,7 +474,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-```eof
 
-Just replace the code on GitHub one more time. Wait for Railway to deploy, then type `/admin` in your bot. **(Remember to still make the bot an admin in the channels you add!)**
-        
+
