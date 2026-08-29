@@ -48,12 +48,13 @@ REDEEM_TIERS = {
 class AdminStates(StatesGroup):
     waiting_for_broadcast = State()
     waiting_for_giftcode = State()
-    # Add Channel Flow
     add_chan_name = State()
     add_chan_url = State()
     add_chan_check = State()
-    # Remove Channel Flow
     waiting_for_rm_chan = State()
+    # New User Management States
+    manage_user_id = State()
+    manage_user_pts = State()
 
 # --- Database Helpers ---
 async def get_settings():
@@ -115,11 +116,21 @@ async def enforce_joins(event: Message | CallbackQuery, state: FSMContext, step:
         buttons = []
         for ch in channels:
             ch_name = ch.get("name", "Channel")
-            buttons.append([InlineKeyboardButton(text=f"↗️ JOIN {ch_name}", url=ch["url"])])
+            buttons.append([InlineKeyboardButton(text=f"📌 JOIN {ch_name}", url=ch["url"])])
             
-        buttons.append([InlineKeyboardButton(text="[ JOINED ]", callback_data=f"check_join_{step}")])
+        buttons.append([InlineKeyboardButton(text="✅ VERIFY & CONTINUE", callback_data=f"check_join_{step}")])
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-        text = f"🛑 <b>Must Join {'All' if step==1 else 'Sponsor'} Channels To Proceed!</b>\n\nClick the buttons below to join, then click <b>[ JOINED ]</b>."
+        
+        # BEAUTIFUL JOIN PAGE TEXT
+        text = (
+            "✨ <b>VERIFICATION REQUIRED</b> ✨\n\n"
+            "To unlock the bot and start earning rewards, please support our sponsors by joining their channels.\n\n"
+            "👇 <b>Action Required:</b>\n"
+            "1️⃣ Click the <b>JOIN</b> buttons below.\n"
+            "2️⃣ Join the channels.\n"
+            "3️⃣ Click <b>[ ✅ VERIFY & CONTINUE ]</b> to proceed!\n\n"
+            "<i>🔒 This helps us keep the bot free and rewarding for everyone!</i>"
+        )
         
         if isinstance(event, CallbackQuery):
             try:
@@ -156,6 +167,19 @@ async def cmd_start(message: Message, state: FSMContext):
         }
         await users_col.insert_one(new_user)
         
+        # ADMIN NEW USER NOTIFICATION
+        try:
+            ref_text = f"<code>{ref_id}</code>" if ref_id else "None"
+            await bot.send_message(
+                ADMIN_ID, 
+                f"🚨 <b>New User Alert!</b> 🚨\n\n"
+                f"👤 <b>Name:</b> <a href='tg://user?id={user_id}'>{message.from_user.first_name}</a>\n"
+                f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
+                f"🔗 <b>Referred By:</b> {ref_text}"
+            )
+        except Exception:
+            pass
+
         if ref_id and ref_id != user_id:
             await users_col.update_one({"_id": ref_id}, {"$inc": {"balance": PER_REFERRAL_POINTS, "total_referrals": 1}})
             try:
@@ -295,6 +319,7 @@ async def process_redemption(call: CallbackQuery):
 async def show_admin_panel(message: Message | CallbackQuery):
     settings = await get_settings()
     total_users = await users_col.count_documents({})
+    pending_tx = await tx_col.count_documents({"status": "PENDING"})
     
     def format_channels(ch_list):
         if not ch_list: return "• None"
@@ -306,12 +331,14 @@ async def show_admin_panel(message: Message | CallbackQuery):
     text = (
         "🛠 <b>Admin Panel Manager</b>\n\n"
         f"👥 <b>Total Users:</b> {total_users}\n"
-        f"⚙️ <b>Step 2 Force Join Status:</b> {'✅ ON' if settings['step2_enabled'] else '❌ OFF'}\n\n"
+        f"⏳ <b>Pending Payouts:</b> {pending_tx}\n"
+        f"⚙️ <b>Step 2 Force Join:</b> {'✅ ON' if settings['step2_enabled'] else '❌ OFF'}\n\n"
         f"📌 <b>Step 1 Channels:</b>\n{s1}\n\n"
         f"📌 <b>Step 2 Channels:</b>\n{s2}"
     )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Add/Deduct Points", callback_data="adm_manage_pts")],
         [InlineKeyboardButton(text="➕ Add Step 1", callback_data="adm_add_s1"), 
          InlineKeyboardButton(text="➖ Remove Step 1", callback_data="adm_rm_s1")],
         [InlineKeyboardButton(text="➕ Add Step 2", callback_data="adm_add_s2"), 
@@ -334,6 +361,49 @@ async def cmd_admin(message: Message, state: FSMContext):
     await state.clear()
     await show_admin_panel(message)
 
+# --- NEW: MANAGE USER POINTS ---
+@router.callback_query(F.data == "adm_manage_pts")
+async def start_manage_pts(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID: return
+    await state.set_state(AdminStates.manage_user_id)
+    await call.message.answer("👤 <b>Send the User ID</b> of the person you want to modify:")
+    await call.answer()
+
+@router.message(AdminStates.manage_user_id)
+async def process_manage_id(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    if not message.text.isdigit():
+        return await message.answer("❌ Invalid ID. It must be numbers only. Try again:")
+        
+    target_id = int(message.text.strip())
+    user = await users_col.find_one({"_id": target_id})
+    if not user:
+        return await message.answer("❌ User not found in database! Try again:")
+        
+    await state.update_data(target_id=target_id)
+    await state.set_state(AdminStates.manage_user_pts)
+    await message.answer(
+        f"✅ <b>User Found:</b> {user['name']}\n"
+        f"💰 <b>Current Balance:</b> {user['balance']} Points\n\n"
+        "🔢 Send the number of points to <b>ADD</b> (e.g., <code>50</code>)\n"
+        "Or type a negative number to <b>DEDUCT</b> (e.g., <code>-50</code>):"
+    )
+
+@router.message(AdminStates.manage_user_pts)
+async def process_manage_pts(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        pts = float(message.text.strip())
+    except ValueError:
+        return await message.answer("❌ Invalid amount. Must be a number. Try again:")
+        
+    data = await state.get_data()
+    await users_col.update_one({"_id": data['target_id']}, {"$inc": {"balance": pts}})
+    await message.answer(f"✅ Successfully modified balance by <b>{pts}</b> points!")
+    await state.clear()
+    await show_admin_panel(message)
+
+# --- IN-BOT CHANNEL BUILDER ---
 @router.callback_query(F.data == "adm_toggle_s2")
 async def toggle_step2(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID: return
@@ -343,14 +413,12 @@ async def toggle_step2(call: CallbackQuery):
     await call.answer(f"Step 2 Force Join is now {'ON' if new_status else 'OFF'}", show_alert=True)
     await show_admin_panel(call)
 
-# --- IN-BOT CHANNEL BUILDER ---
 @router.callback_query(F.data.in_(["adm_add_s1", "adm_add_s2"]))
 async def start_add_chan(call: CallbackQuery, state: FSMContext):
     if call.from_user.id != ADMIN_ID: return
     target = "step1_channels" if call.data == "adm_add_s1" else "step2_channels"
     await state.update_data(target=target)
     await state.set_state(AdminStates.add_chan_name)
-    
     await call.message.answer("📝 <b>Step 1/3:</b> Send the <b>Name</b> of the channel to show on the button (e.g., 🌟 VIP Channel):")
     await call.answer()
 
@@ -382,7 +450,6 @@ async def process_add_check(message: Message, state: FSMContext):
         "url": data['url'],
         "check_id": check_id
     }
-    
     await settings_col.update_one({"_id": "config"}, {"$push": {data['target']: new_chan}})
     await message.answer(f"✅ Successfully added <b>{data['name']}</b>!")
     await state.clear()
@@ -410,7 +477,7 @@ async def process_rm_chan(message: Message, state: FSMContext):
     await state.clear()
     await show_admin_panel(message)
 
-# Admin Approvals & Broadcast (UNCHANGED)
+# --- Admin Approvals & Broadcast ---
 @router.callback_query(F.data.startswith("adm_approve_"))
 async def adm_approve(call: CallbackQuery, state: FSMContext):
     if call.from_user.id != ADMIN_ID: return
