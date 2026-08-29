@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.default import DefaultBotProperties
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
@@ -21,8 +22,8 @@ PAYOUT_CHANNEL = os.getenv("PAYOUT_CHANNEL_ID")
 # Setup Logging
 logging.basicConfig(level=logging.INFO)
 
-# Initialize Bot, Dispatcher, and Database
-bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
+# Initialize Bot, Dispatcher, and Database (UPDATED SYNTAX HERE)
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
@@ -138,7 +139,7 @@ async def cmd_start(message: Message, state: FSMContext):
         }
         await users_col.insert_one(new_user)
         
-        # Reward Referrer (only if they clear force join later, but for simplicity we credit here)
+        # Reward Referrer
         if ref_id and ref_id != user_id:
             await users_col.update_one({"_id": ref_id}, {"$inc": {"balance": PER_REFERRAL_POINTS, "total_referrals": 1}})
             try:
@@ -198,7 +199,6 @@ async def btn_invites(message: Message):
         f"💲 <b>Reward:</b> {PER_REFERRAL_POINTS} Points Per Successful Invite.\n\n"
         "🔥 <i>Pro Tip: Share your link with active friends for maximum earnings!</i>"
     )
-    # Adding a share button
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📢 Share Link", url=f"https://t.me/share/url?url={ref_link}&text=Join%20this%20awesome%20bot%20to%20earn%20free%20gift%20cards!")]
     ])
