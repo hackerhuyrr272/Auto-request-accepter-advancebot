@@ -48,10 +48,6 @@ REDEEM_TIERS = {
 class AdminStates(StatesGroup):
     waiting_for_broadcast = State()
     waiting_for_giftcode = State()
-    waiting_for_add_s1 = State()
-    waiting_for_rm_s1 = State()
-    waiting_for_add_s2 = State()
-    waiting_for_rm_s2 = State()
 
 # --- Database Helpers ---
 async def get_settings():
@@ -59,7 +55,7 @@ async def get_settings():
     if not settings:
         settings = {
             "_id": "config",
-            "step1_channels": [], 
+            "step1_channels": [], # Stores dicts: {"name": "...", "url": "...", "check_id": "..."}
             "step2_channels": [],
             "step2_enabled": False
         }
@@ -84,35 +80,57 @@ async def check_membership(user_id, channel_username):
     except TelegramBadRequest:
         return False 
 
-async def enforce_joins(message: Message, state: FSMContext, step: int = 1):
+async def enforce_joins(event: Message | CallbackQuery, state: FSMContext, step: int = 1):
     settings = await get_settings()
     channels = settings['step1_channels'] if step == 1 else settings['step2_channels']
     
     if not channels or (step == 2 and not settings['step2_enabled']):
         if step == 1 and settings['step2_enabled']:
-            return await enforce_joins(message, state, step=2)
+            return await enforce_joins(event, state, step=2)
         return True 
         
-    not_joined = []
-    buttons = []
-    for ch in channels:
-        if not await check_membership(message.from_user.id, ch):
-            not_joined.append(ch)
-            buttons.append([InlineKeyboardButton(text=f"↗️ JOIN {ch}", url=f"https://t.me/{ch.replace('@', '')}")])
+    user_id = event.from_user.id
+    needs_to_join = False
+    
+    # 1. Determine if we need to block the user
+    if isinstance(event, Message):
+        # On /start, if there are ANY channels (even unverified), we show the buttons
+        for ch in channels:
+            if ch.get("check_id"):
+                if not await check_membership(user_id, ch["check_id"]):
+                    needs_to_join = True
+            else:
+                needs_to_join = True # Always show unverified on first /start
+    else:
+        # On [JOINED] click, we ONLY fail them if a verified channel check fails
+        for ch in channels:
+            if ch.get("check_id"):
+                if not await check_membership(user_id, ch["check_id"]):
+                    needs_to_join = True
+
+    # 2. Show the buttons if needed
+    if needs_to_join:
+        buttons = []
+        for ch in channels:
+            ch_name = ch.get("name", "Channel")
+            buttons.append([InlineKeyboardButton(text=f"↗️ JOIN {ch_name}", url=ch["url"])])
             
-    if not_joined:
         buttons.append([InlineKeyboardButton(text="[ JOINED ]", callback_data=f"check_join_{step}")])
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
         text = f"🛑 <b>Must Join {'All' if step==1 else 'Sponsor'} Channels To Proceed!</b>\n\nClick the buttons below to join, then click <b>[ JOINED ]</b>."
         
-        if isinstance(message, CallbackQuery):
-            await message.message.edit_text(text, reply_markup=kb)
+        if isinstance(event, CallbackQuery):
+            try:
+                await event.message.edit_text(text, reply_markup=kb)
+            except TelegramBadRequest:
+                pass # Ignore if text is exactly the same
         else:
-            await message.answer(text, reply_markup=kb)
+            await event.answer(text, reply_markup=kb)
         return False
         
+    # If they pass this step, check step 2
     if step == 1 and settings['step2_enabled']:
-        return await enforce_joins(message, state, step=2)
+        return await enforce_joins(event, state, step=2)
     return True
 
 # --- Handlers ---
@@ -148,17 +166,17 @@ async def cmd_start(message: Message, state: FSMContext):
     if cleared:
         await send_welcome(message)
 
-async def send_welcome(message: Message):
+async def send_welcome(event: Message | CallbackQuery):
     text = (
-        f"✨ <b>Welcome {message.from_user.first_name} to the Premium Reward Bot!</b>\n\n"
+        f"✨ <b>Welcome {event.from_user.first_name} to the Premium Reward Bot!</b>\n\n"
         "Earn points by completing tasks and inviting friends, then redeem them for Google Play Gift Cards.\n\n"
         "👇 <b>Select an option from the menu below to start earning!</b>"
     )
-    if isinstance(message, CallbackQuery):
-        await message.message.delete()
-        await bot.send_message(message.from_user.id, text, reply_markup=main_menu_kb())
+    if isinstance(event, CallbackQuery):
+        await event.message.delete()
+        await bot.send_message(event.from_user.id, text, reply_markup=main_menu_kb())
     else:
-        await message.answer(text, reply_markup=main_menu_kb())
+        await event.answer(text, reply_markup=main_menu_kb())
 
 @router.callback_query(F.data.startswith("check_join_"))
 async def check_join_callback(call: CallbackQuery, state: FSMContext):
@@ -168,7 +186,7 @@ async def check_join_callback(call: CallbackQuery, state: FSMContext):
         await call.answer("✅ Verification Successful!", show_alert=True)
         await send_welcome(call)
     else:
-        await call.answer("❌ You haven't joined all channels yet!", show_alert=True)
+        await call.answer("❌ You haven't joined all verified channels yet!", show_alert=True)
 
 @router.message(F.text == "👤 Account")
 async def btn_account(message: Message):
@@ -274,27 +292,28 @@ async def process_redemption(call: CallbackQuery):
     await bot.send_message(ADMIN_ID, admin_text, reply_markup=admin_kb)
     await call.message.edit_text(f"✅ <b>Request Submitted!</b>\n\nYour request for ₹{rupees} has been sent to the admins. It is currently pending.", reply_markup=main_menu_kb())
 
-# --- ADVANCED ADMIN PANEL ---
+# --- ADMIN PANEL ---
 async def show_admin_panel(message: Message | CallbackQuery):
     settings = await get_settings()
     total_users = await users_col.count_documents({})
     
-    s1 = "\n".join([f"• {ch}" for ch in settings['step1_channels']]) if settings['step1_channels'] else "• None"
-    s2 = "\n".join([f"• {ch}" for ch in settings['step2_channels']]) if settings['step2_channels'] else "• None"
+    def format_channels(ch_list):
+        if not ch_list: return "• None"
+        return "\n".join([f"• {ch.get('name', 'Unknown')} {'(Unverified)' if not ch.get('check_id') else ''}" for ch in ch_list])
+    
+    s1 = format_channels(settings['step1_channels'])
+    s2 = format_channels(settings['step2_channels'])
     
     text = (
         "🛠 <b>Admin Panel Manager</b>\n\n"
         f"👥 <b>Total Users:</b> {total_users}\n"
         f"⚙️ <b>Step 2 Force Join Status:</b> {'✅ ON' if settings['step2_enabled'] else '❌ OFF'}\n\n"
         f"📌 <b>Step 1 Channels:</b>\n{s1}\n\n"
-        f"📌 <b>Step 2 Channels:</b>\n{s2}"
+        f"📌 <b>Step 2 Channels:</b>\n{s2}\n\n"
+        "<i>Note: Edit channel lists directly in MongoDB Atlas.</i>"
     )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Add Step 1", callback_data="adm_add_s1"), 
-         InlineKeyboardButton(text="➖ Remove Step 1", callback_data="adm_rm_s1")],
-        [InlineKeyboardButton(text="➕ Add Step 2", callback_data="adm_add_s2"), 
-         InlineKeyboardButton(text="➖ Remove Step 2", callback_data="adm_rm_s2")],
         [InlineKeyboardButton(text="🔄 Toggle Step 2 ON/OFF", callback_data="adm_toggle_s2")],
         [InlineKeyboardButton(text="📢 Broadcast Message", callback_data="adm_broadcast")]
     ])
@@ -305,7 +324,7 @@ async def show_admin_panel(message: Message | CallbackQuery):
         try:
             await message.message.edit_text(text, reply_markup=kb)
         except TelegramBadRequest:
-            pass # Ignore if text is exactly the same
+            pass 
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext):
@@ -321,57 +340,6 @@ async def toggle_step2(call: CallbackQuery):
     await settings_col.update_one({"_id": "config"}, {"$set": {"step2_enabled": new_status}})
     await call.answer(f"Step 2 Force Join is now {'ON' if new_status else 'OFF'}", show_alert=True)
     await show_admin_panel(call)
-
-# Channel Management
-@router.callback_query(F.data.in_(["adm_add_s1", "adm_add_s2", "adm_rm_s1", "adm_rm_s2"]))
-async def ask_channel_mgmt(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
-    action = call.data
-    
-    if action == "adm_add_s1":
-        await state.set_state(AdminStates.waiting_for_add_s1)
-        await call.message.answer("📝 Send the username of the channel to <b>ADD to Step 1</b> (e.g., @mychannel):")
-    elif action == "adm_add_s2":
-        await state.set_state(AdminStates.waiting_for_add_s2)
-        await call.message.answer("📝 Send the username of the channel to <b>ADD to Step 2</b> (e.g., @mychannel):")
-    elif action == "adm_rm_s1":
-        await state.set_state(AdminStates.waiting_for_rm_s1)
-        await call.message.answer("🗑 Send the username of the channel to <b>REMOVE from Step 1</b> (e.g., @mychannel):")
-    elif action == "adm_rm_s2":
-        await state.set_state(AdminStates.waiting_for_rm_s2)
-        await call.message.answer("🗑 Send the username of the channel to <b>REMOVE from Step 2</b> (e.g., @mychannel):")
-    
-    await call.answer()
-
-@router.message(AdminStates.waiting_for_add_s1)
-@router.message(AdminStates.waiting_for_add_s2)
-async def process_add_chan(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID: return
-    channel = message.text.strip()
-    if not channel.startswith("@"):
-        return await message.answer("❌ Invalid format. Username must start with @. Try again:")
-        
-    cur_state = await state.get_state()
-    field = "step1_channels" if cur_state == AdminStates.waiting_for_add_s1 else "step2_channels"
-    
-    await settings_col.update_one({"_id": "config"}, {"$addToSet": {field: channel}})
-    await message.answer(f"✅ Successfully added {channel} to {field}!")
-    await state.clear()
-    await show_admin_panel(message)
-
-@router.message(AdminStates.waiting_for_rm_s1)
-@router.message(AdminStates.waiting_for_rm_s2)
-async def process_rm_chan(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID: return
-    channel = message.text.strip()
-    
-    cur_state = await state.get_state()
-    field = "step1_channels" if cur_state == AdminStates.waiting_for_rm_s1 else "step2_channels"
-    
-    await settings_col.update_one({"_id": "config"}, {"$pull": {field: channel}})
-    await message.answer(f"✅ Successfully removed {channel} from {field}.")
-    await state.clear()
-    await show_admin_panel(message)
 
 # Admin Approvals
 @router.callback_query(F.data.startswith("adm_approve_"))
@@ -474,5 +442,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
